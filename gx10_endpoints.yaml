@@ -1,0 +1,37 @@
+# GX10 endpoint configurations for smoke tests
+# One entry per hardware unit across the local 10.0.0.x subnet
+
+endpoints:
+  # gx10-90c5: vLLM, Qwen3.6-35B-A3B-FP8
+  - name: gx10-90c5-qwen36-vllm
+    base_url: http://10.0.0.9:5000/v1
+    model: Qwen/Qwen3.6-35B-A3B-FP8
+    runtime: vllm
+    api_key: dummy
+
+  # gx10-2 (Rivet2): vLLM, Qwen3.5-35B-A3B-FP8
+  - name: gx10-2-qwen35-vllm
+    base_url: http://10.0.0.13:8000/v1
+    model: Qwen/Qwen3.5-35B-A3B-FP8
+    runtime: vllm
+    api_key: dummy
+
+  # gx10-3 (Rivet3): llama.cpp, Qwen3.5-122B-A10B-IQ4_KSS
+  - name: gx10-3-qwen35-122b-llamacpp
+    base_url: http://10.0.0.21:8000/v1
+    model: Qwen3.5-122B-A10B-IQ4_KSS
+    runtime: llamacpp
+    api_key: dummy
+
+  # gx10-2 (Rivet2): Ollama, gemma4:26b
+  - name: gx10-2-gemma4-ollama
+    base_url: http://10.0.0.13:11434/v1
+    model: gemma4:26b
+    runtime: ollama
+    api_key: dummy
+
+defaults:
+  # Per-test timeout (T1/T2/T3/T4)
+  timeout_seconds: 60
+  # Max parallel endpoints (4 = all at once)
+  max_parallel: 4
