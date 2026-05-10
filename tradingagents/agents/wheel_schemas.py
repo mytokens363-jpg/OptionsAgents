@@ -44,8 +44,11 @@ from pydantic import BaseModel, Field, model_validator
 class OptionRight(str, Enum):
     """Option contract right."""
 
-    PUT = "P"
-    CALL = "C"
+    # Plain-English values; single letters ("P", "C") gave models no semantic
+    # anchor in GX10 smoke tests. The 122B got these right but smaller models
+    # may not — defending consistently across model sizes.
+    PUT = "put"
+    CALL = "call"
 
 
 class WheelAction(str, Enum):
@@ -56,45 +59,61 @@ class WheelAction(str, Enum):
     a single net-credit transaction, not two independent legs.
     """
 
-    SELL_PUT = "STO_PUT"               # Open: sell cash-secured put
-    BUY_PUT = "BTC_PUT"                # Close: buy back short put (profit-take or defensive)
-    SELL_CALL = "STO_CALL"             # Open: sell covered call against assigned shares
-    BUY_CALL = "BTC_CALL"              # Close: buy back short call (profit-take or defensive)
-    ROLL_PUT = "ROLL_PUT"              # Compound: BTC current put + STO new put
-    ROLL_CALL = "ROLL_CALL"            # Compound: BTC current call + STO new call
-    NO_OP = "NO_OP"                    # Explicit no-action with structured reason
+    # IMPORTANT — wire-format value design note:
+    # The string values below are what the LLM sees and must select from when
+    # filling a structured-output schema. We deliberately use plain-English
+    # phrases ("sell_cash_secured_put") rather than trader jargon ("STO_PUT")
+    # because GX10 smoke-testing in May 2026 showed that all four tested
+    # models (Qwen3.6-35B, Qwen3.5-35B, Qwen3.5-122B, gemma4:26b) defaulted
+    # to "STO_CALL" when asked to propose a cash-secured put — they were
+    # correctly identifying the option right but incorrectly picking the
+    # action enum, because terse jargon values gave them no semantic anchor
+    # to map "cash-secured put" onto. Plain-English values let the model
+    # match the prompt's vocabulary directly to an allowed value.
+    # The Python *names* (SELL_PUT, NO_OP, etc.) stay stable — no executor,
+    # memory log, or downstream consumer needs to change.
+    SELL_PUT = "sell_cash_secured_put"
+    BUY_PUT = "buy_put_to_close"
+    SELL_CALL = "sell_covered_call"
+    BUY_CALL = "buy_call_to_close"
+    ROLL_PUT = "roll_put_to_later_expiry"
+    ROLL_CALL = "roll_call_to_later_expiry"
+    NO_OP = "do_not_trade"
 
 
 class CycleStage(str, Enum):
     """Where this symbol currently sits in the wheel cycle."""
 
-    CASH = "CASH"                      # No position; eligible to sell puts
-    SHORT_PUT = "SHORT_PUT"            # Open short put; awaiting expiry or assignment
-    ASSIGNED = "ASSIGNED"              # Shares assigned; eligible to sell calls
-    SHORT_CALL = "SHORT_CALL"          # Open covered call; awaiting expiry or called-away
+    # Plain-English values for the same reason as WheelAction (above).
+    CASH = "cash_no_position"          # No position; eligible to sell puts
+    SHORT_PUT = "short_put_open"       # Open short put; awaiting expiry or assignment
+    ASSIGNED = "shares_assigned"       # Shares assigned; eligible to sell calls
+    SHORT_CALL = "covered_call_open"   # Open covered call; awaiting expiry or called-away
 
 
 class NoOpReason(str, Enum):
     """Structured reasons for declining to act. Never silent."""
 
-    EARNINGS_BLACKOUT = "EARNINGS_BLACKOUT"        # Earnings within configured window
-    REGIME_UNFAVORABLE = "REGIME_UNFAVORABLE"      # regime.json blocks new opens
-    CHAIN_UNAVAILABLE = "CHAIN_UNAVAILABLE"        # IBKR returned empty/stale chain
-    NO_VIABLE_STRIKE = "NO_VIABLE_STRIKE"          # No strike met delta/premium criteria
-    BUYING_POWER_INSUFFICIENT = "BUYING_POWER_INSUFFICIENT"
-    CONCENTRATION_LIMIT = "CONCENTRATION_LIMIT"    # Position would exceed per-symbol cap
-    POSITION_AT_PROFIT_TARGET = "POSITION_AT_PROFIT_TARGET"  # Hold for close, not roll
-    DTE_OUTSIDE_BAND = "DTE_OUTSIDE_BAND"          # No expiries in target DTE window
-    DUPLICATE_PROPOSAL = "DUPLICATE_PROPOSAL"      # Already have an open position matching
-    OTHER = "OTHER"                                # Explained in free-text rationale
+    # Values are plain-English so the model can map prompt vocabulary
+    # ("earnings tomorrow", "no buying power") directly to an allowed reason.
+    EARNINGS_BLACKOUT = "earnings_blackout_window"
+    REGIME_UNFAVORABLE = "market_regime_unfavorable"
+    CHAIN_UNAVAILABLE = "option_chain_unavailable"
+    NO_VIABLE_STRIKE = "no_strike_meets_criteria"
+    BUYING_POWER_INSUFFICIENT = "buying_power_insufficient"
+    CONCENTRATION_LIMIT = "position_concentration_limit_exceeded"
+    POSITION_AT_PROFIT_TARGET = "position_at_profit_target_hold_to_close"
+    DTE_OUTSIDE_BAND = "no_expiry_in_target_window"
+    DUPLICATE_PROPOSAL = "duplicate_position_already_open"
+    OTHER = "other_see_rationale"
 
 
 class RollReason(str, Enum):
     """Why a roll is being proposed (for memory/reflection tagging)."""
 
-    DEFENSIVE_ITM = "DEFENSIVE_ITM"                # Strike breached, rolling out/down
-    PROFIT_TAKE_AND_EXTEND = "PROFIT_TAKE_AND_EXTEND"  # ≥ profit target, harvest premium
-    DTE_MANAGEMENT = "DTE_MANAGEMENT"              # Approaching expiry, no other reason
+    DEFENSIVE_ITM = "defensive_strike_breached"
+    PROFIT_TAKE_AND_EXTEND = "profit_target_reached_extend_position"
+    DTE_MANAGEMENT = "approaching_expiry_no_other_reason"
 
 
 # ---------------------------------------------------------------------------
@@ -186,36 +205,94 @@ class OptionsProposal(BaseModel):
     """
 
     symbol: str = Field(description="Underlying ticker symbol, e.g. AAPL")
-    cycle_stage: CycleStage = Field(description="Wheel stage this symbol is in right now")
-    action: WheelAction = Field(description="Proposed action; NO_OP is valid and requires no_op_reason")
+    cycle_stage: CycleStage = Field(
+        description=(
+            "The wheel cycle stage this symbol is in right now, derived from current positions. "
+            "Use cash_no_position when there is no position and you can sell puts. "
+            "Use short_put_open when there is already an open short put. "
+            "Use shares_assigned when shares are held and you can sell covered calls. "
+            "Use covered_call_open when there is an open covered call."
+        ),
+    )
+    action: WheelAction = Field(
+        description=(
+            "The wheel action to take. Map the user's natural-language intent to the closest value below:\n"
+            "- If the user wants to sell a cash-secured put (open a new short put for premium): "
+            "use sell_cash_secured_put.\n"
+            "- If the user wants to write a covered call against assigned shares: use sell_covered_call.\n"
+            "- If the user wants to close an existing short put: use buy_put_to_close.\n"
+            "- If the user wants to close an existing short call: use buy_call_to_close.\n"
+            "- If the user wants to roll a put to a later expiry: use roll_put_to_later_expiry.\n"
+            "- If the user wants to roll a call to a later expiry: use roll_call_to_later_expiry.\n"
+            "- If risk gates (earnings within blackout window, unfavorable market regime, "
+            "insufficient buying power, etc.) make any trade inappropriate, use do_not_trade and "
+            "populate no_op_reason with the specific reason."
+        ),
+    )
 
-    # Trade economics — required when action is not NO_OP
-    right: Optional[OptionRight] = Field(default=None, description="P or C; omit when action is NO_OP")
-    strike: Optional[float] = Field(default=None, description="Strike price; omit when action is NO_OP")
-    expiry: Optional[date] = Field(default=None, description="Contract expiry; omit when action is NO_OP")
-    contracts: Optional[int] = Field(default=None, description="Number of contracts; positive integer")
+    # Trade economics — required when action is not do_not_trade
+    right: Optional[OptionRight] = Field(
+        default=None,
+        description=(
+            "Option right: put or call. Must match the action — put actions require put, "
+            "call actions require call. Omit only when action is do_not_trade."
+        ),
+    )
+    strike: Optional[float] = Field(
+        default=None,
+        description="Strike price in dollars. Omit only when action is do_not_trade.",
+    )
+    expiry: Optional[date] = Field(
+        default=None,
+        description="Contract expiry date in ISO format (YYYY-MM-DD). Omit only when action is do_not_trade.",
+    )
+    contracts: Optional[int] = Field(
+        default=None,
+        description="Number of contracts; positive integer. Omit only when action is do_not_trade.",
+    )
     delta: Optional[float] = Field(default=None, description="Option delta at proposal time (signed)")
     expected_premium: Optional[float] = Field(default=None, description="Expected mid-price premium per share")
     dte: Optional[int] = Field(default=None, description="Days to expiry from today")
 
     # Roll-specific
-    roll_reason: Optional[RollReason] = Field(default=None, description="Required when action is ROLL_*")
+    roll_reason: Optional[RollReason] = Field(
+        default=None,
+        description=(
+            "REQUIRED when action is roll_put_to_later_expiry or roll_call_to_later_expiry. "
+            "Encodes why the roll is being proposed."
+        ),
+    )
     closing_position_premium: Optional[float] = Field(
         default=None,
-        description="Premium to pay to close the existing leg (for ROLL_* actions)",
+        description=(
+            "Premium to pay (per share) to close the existing leg before the new leg is opened. "
+            "REQUIRED when action is a roll."
+        ),
     )
 
-    # NO_OP path
+    # do_not_trade path
     no_op_reason: Optional[NoOpReason] = Field(
         default=None,
-        description="REQUIRED when action is NO_OP. Encodes why the agent declined to act.",
+        description=(
+            "REQUIRED when action is do_not_trade. Encodes the specific risk gate or condition "
+            "that prevents trading. Map the situation to the closest reason: earnings within "
+            "blackout window → earnings_blackout_window; market regime blocks new opens → "
+            "market_regime_unfavorable; no option chain data available → option_chain_unavailable; "
+            "no strike meets delta/premium criteria → no_strike_meets_criteria; insufficient "
+            "buying power → buying_power_insufficient; would exceed per-symbol concentration cap "
+            "→ position_concentration_limit_exceeded; position is at profit target and should be "
+            "closed not rolled → position_at_profit_target_hold_to_close; no expiry available in "
+            "the target DTE window → no_expiry_in_target_window; already have an open position "
+            "matching this proposal → duplicate_position_already_open; anything else → "
+            "other_see_rationale with details in rationale field."
+        ),
     )
 
     # Always required — natural language anchored in the analysis
     rationale: str = Field(
         description=(
             "Two to four sentences. For trade actions: justify strike, expiry, and "
-            "sizing against the chain and the cycle stage. For NO_OP: explain "
+            "sizing against the chain and the cycle stage. For do_not_trade: explain "
             "the specific evidence behind no_op_reason."
         ),
     )
@@ -224,17 +301,19 @@ class OptionsProposal(BaseModel):
     def _validate_action_consistency(self):
         """Enforce that schema fields are consistent with the chosen action.
 
-        NO_OP must carry no_op_reason; trade actions must carry the legs;
-        ROLL_* must carry roll_reason and closing_position_premium. This
+        do_not_trade must carry no_op_reason; trade actions must carry the legs;
+        roll actions must carry roll_reason and closing_position_premium. This
         is the structural answer to the silent-failure regression — the
         proposal cannot validate as 'I won't do anything' without saying why.
         """
         if self.action == WheelAction.NO_OP:
             if self.no_op_reason is None:
-                raise ValueError("NO_OP proposals must include no_op_reason")
+                raise ValueError(
+                    f"{self.action.value} proposals must include no_op_reason"
+                )
             return self
 
-        # All non-NO_OP actions require the core trade legs
+        # All non-do_not_trade actions require the core trade legs
         missing = [
             name for name, value in (
                 ("right", self.right),
@@ -250,17 +329,21 @@ class OptionsProposal(BaseModel):
 
         if self.action in (WheelAction.ROLL_PUT, WheelAction.ROLL_CALL):
             if self.roll_reason is None:
-                raise ValueError("ROLL_* proposals must include roll_reason")
+                raise ValueError(f"{self.action.value} proposals must include roll_reason")
             if self.closing_position_premium is None:
-                raise ValueError("ROLL_* proposals must include closing_position_premium")
+                raise ValueError(f"{self.action.value} proposals must include closing_position_premium")
 
         # Right must match the put/call action family
         if self.action in (WheelAction.SELL_PUT, WheelAction.BUY_PUT, WheelAction.ROLL_PUT):
             if self.right != OptionRight.PUT:
-                raise ValueError(f"{self.action.value} requires right=PUT")
+                raise ValueError(
+                    f"{self.action.value} requires right={OptionRight.PUT.value}"
+                )
         elif self.action in (WheelAction.SELL_CALL, WheelAction.BUY_CALL, WheelAction.ROLL_CALL):
             if self.right != OptionRight.CALL:
-                raise ValueError(f"{self.action.value} requires right=CALL")
+                raise ValueError(
+                    f"{self.action.value} requires right={OptionRight.CALL.value}"
+                )
 
         return self
 
@@ -361,12 +444,13 @@ def render_wheel_decision(decision: WheelDecision) -> str:
 class CycleOutcomeStatus(str, Enum):
     """How a wheel-cycle leg resolved."""
 
-    EXPIRED_WORTHLESS = "EXPIRED_WORTHLESS"        # Best case for STO leg
-    CLOSED_FOR_PROFIT = "CLOSED_FOR_PROFIT"        # BTC at target
-    CLOSED_DEFENSIVELY = "CLOSED_DEFENSIVELY"      # BTC at loss to limit damage
-    ASSIGNED = "ASSIGNED"                          # Put assigned → shares acquired
-    CALLED_AWAY = "CALLED_AWAY"                    # Call assigned → shares delivered
-    ROLLED = "ROLLED"                              # Position rolled to new leg
+    # Plain-English values written by the reflection agent (Stage 4).
+    EXPIRED_WORTHLESS = "expired_worthless"        # Best case for STO leg
+    CLOSED_FOR_PROFIT = "closed_for_profit"        # BTC at target
+    CLOSED_DEFENSIVELY = "closed_defensively"      # BTC at loss to limit damage
+    ASSIGNED = "put_assigned_shares_acquired"      # Put assigned → shares acquired
+    CALLED_AWAY = "call_assigned_shares_delivered" # Call assigned → shares delivered
+    ROLLED = "rolled_to_new_leg"                   # Position rolled to new leg
 
 
 class CycleOutcome(BaseModel):

@@ -51,7 +51,7 @@ def valid_sto_put():
     )
     assert p.action == WheelAction.SELL_PUT
     md = render_options_proposal(p)
-    assert "SELL_PUT" in md or "STO_PUT" in md
+    assert "sell_cash_secured_put" in md, f"expected new wire-format value, got: {md}"
 
 # 2. Valid NO_OP with structured reason
 def valid_no_op():
@@ -102,7 +102,8 @@ def call_action_with_put_right_fails():
         )
         raise AssertionError("should have raised")
     except ValidationError as e:
-        assert "CALL" in str(e) or "PUT" in str(e)
+        err = str(e).lower()
+        assert "call" in err or "put" in err, f"expected put/call in error: {e}"
 
 # 6. ROLL_PUT requires roll_reason and closing premium
 def roll_put_missing_metadata_fails():
@@ -159,7 +160,7 @@ def decision_render():
     )
     md = render_wheel_decision(decision)
     assert "FINAL WHEEL ACTION" in md
-    assert "STO_PUT" in md
+    assert "sell_cash_secured_put" in md, f"expected new wire value in: {md}"
 
 # 10. CycleOutcome record
 def cycle_outcome():
@@ -174,7 +175,7 @@ def cycle_outcome():
         setup_signature="put_delta20_dte30_trend_up",
     )
     md = render_cycle_outcome(o)
-    assert "EXPIRED_WORTHLESS" in md
+    assert "expired_worthless" in md, f"expected new wire value in: {md}"
 
 
 for name, fn in [
