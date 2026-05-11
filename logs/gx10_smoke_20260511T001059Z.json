@@ -1,0 +1,152 @@
+[
+  {
+    "name": "gx10-90c5-qwen36-vllm",
+    "results": {
+      "T1": {
+        "test": "T1",
+        "status": "\u2713",
+        "latency_ms": 166,
+        "notes": "models: Qwen/Qwen3.6-35B-A3B-FP8"
+      },
+      "T2": {
+        "test": "T2",
+        "status": "\u2713",
+        "latency_ms": 3663,
+        "notes": ""
+      },
+      "T3": {
+        "test": "T3",
+        "status": "\u2717",
+        "latency_ms": 0,
+        "notes": "cold: Could not parse response content as the length limit was reached - CompletionUsa, warm: Could not parse response content as the length limit was reached - CompletionUsa",
+        "T3_warm_ms": 0
+      },
+      "T4a": {
+        "test": "T4a",
+        "status": "\u2717",
+        "latency_ms": 0,
+        "notes": "Could not parse response content as the length limit was reached - CompletionUsage(completion_tokens=2048, prompt_tokens"
+      },
+      "T4b": {
+        "test": "T4b",
+        "status": "\u2713",
+        "latency_ms": 32996,
+        "notes": ""
+      }
+    },
+    "timestamp": "2026-05-11T00:09:07.535192Z"
+  },
+  {
+    "name": "gx10-2-qwen35-vllm",
+    "results": {
+      "T1": {
+        "test": "T1",
+        "status": "\u2713",
+        "latency_ms": 177,
+        "notes": "models: Qwen/Qwen3.5-35B-A3B-FP8"
+      },
+      "T2": {
+        "test": "T2",
+        "status": "\u2713",
+        "latency_ms": 7179,
+        "notes": ""
+      },
+      "T3": {
+        "test": "T3",
+        "status": "\u2717",
+        "latency_ms": 0,
+        "notes": "cold: Could not parse response content as the length limit was reached - CompletionUsa, warm: Could not parse response content as the length limit was reached - CompletionUsa",
+        "T3_warm_ms": 0
+      },
+      "T4a": {
+        "test": "T4a",
+        "status": "\u2717",
+        "latency_ms": 0,
+        "notes": "timeout"
+      },
+      "T4b": {
+        "test": "T4b",
+        "status": "\u2717",
+        "latency_ms": 0,
+        "notes": "timeout"
+      }
+    },
+    "timestamp": "2026-05-11T00:09:16.649310Z"
+  },
+  {
+    "name": "gx10-3-qwen35-122b-llamacpp",
+    "results": {
+      "T1": {
+        "test": "T1",
+        "status": "\u2713",
+        "latency_ms": 18,
+        "notes": "models: /home/rivet3/models/Qwen3.5-122B-A10B-IQ4_KSS.gguf  \u26a0 config says 'Qwen3.5-122B-A10B-IQ4_KSS', server says [/home/rivet3/models/Qwen3.5-122B-A10B-IQ4_KSS.gguf]"
+      },
+      "T2": {
+        "test": "T2",
+        "status": "\u2713",
+        "latency_ms": 6067,
+        "notes": ""
+      },
+      "T3": {
+        "test": "T3",
+        "status": "\u2713",
+        "latency_ms": 945,
+        "notes": "cold=1177ms, warm=945ms; latency=945ms",
+        "T3_cold_ms": 1177,
+        "T3_warm_ms": 945
+      },
+      "T4a": {
+        "test": "T4a",
+        "status": "\u2713",
+        "latency_ms": 13645,
+        "notes": ""
+      },
+      "T4b": {
+        "test": "T4b",
+        "status": "\u2713",
+        "latency_ms": 13411,
+        "notes": ""
+      }
+    },
+    "timestamp": "2026-05-11T00:07:34.295124Z"
+  },
+  {
+    "name": "gx10-2-gemma4-ollama",
+    "results": {
+      "T1": {
+        "test": "T1",
+        "status": "\u2713",
+        "latency_ms": 171,
+        "notes": "models: gemma4:26b"
+      },
+      "T2": {
+        "test": "T2",
+        "status": "\u2713",
+        "latency_ms": 6245,
+        "notes": ""
+      },
+      "T3": {
+        "test": "T3",
+        "status": "\u2713",
+        "latency_ms": 34028,
+        "notes": "cold=32248ms, warm=34028ms; latency=34028ms",
+        "T3_cold_ms": 32248,
+        "T3_warm_ms": 34028
+      },
+      "T4a": {
+        "test": "T4a",
+        "status": "\u2717",
+        "latency_ms": 0,
+        "notes": "timeout"
+      },
+      "T4b": {
+        "test": "T4b",
+        "status": "\u2717",
+        "latency_ms": 0,
+        "notes": "timeout"
+      }
+    },
+    "timestamp": "2026-05-11T00:10:59.999173Z"
+  }
+]

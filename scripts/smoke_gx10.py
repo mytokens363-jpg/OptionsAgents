@@ -165,7 +165,7 @@ async def test_structured_output(ep: dict, timeout: int) -> dict:
             api_key=ep["api_key"],
             base_url=base_url,
             temperature=0,
-            max_tokens=2048,  # reasoning models burn tokens on CoT; structured output needs room
+            max_tokens=2048,  # reasoning models (Qwen3.6) generate full CoT by default
         )
         llm_structured = llm.with_structured_output(HealthCheck)
     except Exception:
