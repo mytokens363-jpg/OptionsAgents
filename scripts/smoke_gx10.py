@@ -41,6 +41,20 @@ CycleStage = _schema_mod.CycleStage
 OptionRight = _schema_mod.OptionRight
 NoOpReason = _schema_mod.NoOpReason
 
+# Load wheel_schema_assertions the same way. It imports from
+# tradingagents.agents.wheel_schemas, so inject our pre-loaded schemas module
+# under that name to avoid the package init pulling in langchain.
+_ASSERTION_PATH = os.path.join(_HERE, "..", "tradingagents", "agents", "wheel_schema_assertions.py")
+_aspec = importlib.util.spec_from_file_location("wheel_schema_assertions", _ASSERTION_PATH)
+_assertions = importlib.util.module_from_spec(_aspec)
+sys.modules.setdefault("tradingagents", type(sys)("tradingagents"))
+sys.modules.setdefault("tradingagents.agents", type(sys)("tradingagents.agents"))
+sys.modules["tradingagents.agents.wheel_schemas"] = _schema_mod
+_aspec.loader.exec_module(_assertions)
+
+assert_structured_response_complete = _assertions.assert_structured_response_complete
+assert_raw_content_nonempty = _assertions.assert_raw_content_nonempty
+
 # ---------------------------------------------------------------------------
 # Pydantic schemas for test 3
 # ---------------------------------------------------------------------------
@@ -241,8 +255,16 @@ async def test_structured_output(ep: dict, timeout: int) -> dict:
 
 async def _test_options_proposal(ep: dict, timeout: int, prompt: str,
                                   expected_action: WheelAction,
-                                  extra_checks=None) -> dict:
-    """Shared body for T4a and T4b."""
+                                  expected_no_op_reason=None) -> dict:
+    """Shared body for T4a and T4b.
+
+    Uses include_raw=True so we can detect the llama.cpp Qwen3 mode where
+    the server returns reasoning_content but empty content (which would
+    otherwise silently produce a default-filled OptionsProposal that looks
+    superficially valid). All field-level checks centralized in
+    tradingagents.agents.wheel_schema_assertions so the assertion logic
+    itself is unit-tested.
+    """
     base_url = ep["base_url"].rstrip("/")
     test_name = "T4a" if expected_action == WheelAction.SELL_PUT else "T4b"
     result = {"test": test_name, "status": "—", "latency_ms": 0, "notes": ""}
@@ -255,43 +277,47 @@ async def _test_options_proposal(ep: dict, timeout: int, prompt: str,
             temperature=0,
             max_tokens=2048,  # structured output needs room for reasoning + complex JSON
         )
-        llm_structured = llm.with_structured_output(OptionsProposal)
-    except Exception:
+        # include_raw=True returns {"raw", "parsed", "parsing_error"} so we can
+        # inspect the wire-level response before trusting the parsed object.
+        # This is the only reliable way to catch empty-content / reasoning-only
+        # responses from llama.cpp Qwen3 endpoints.
+        llm_structured = llm.with_structured_output(OptionsProposal, include_raw=True)
+    except Exception as e:
         result["status"] = "⊘"
-        result["notes"] = "binding_unsupported"
+        result["notes"] = f"binding_unsupported: {str(e)[:100]}"
         return result
 
     for attempt in range(2):
         try:
             start = time.monotonic()
             wrapped = asyncio.wait_for(llm_structured.ainvoke(prompt), timeout=timeout)
-            proposal = await wrapped
+            raw_result = await wrapped
             elapsed = time.monotonic() - start
             result["latency_ms"] = round(elapsed * 1000)
 
-
-
-            # Compare by enum member, not string value — model-agnostic
-            if proposal.action != expected_action:
-                result["status"] = "✗"
-                result["notes"] = f"action={proposal.action.value} ({proposal.action.name}), expected {expected_action.value} ({expected_action.name})"
+            # Centralized assertion — checks raw content nonempty, parsing
+            # succeeded, action matches, substantive fields populated,
+            # rationale non-trivial. See wheel_schema_assertions.py for
+            # the full check list and its unit tests.
+            ok, note = assert_structured_response_complete(
+                raw_result,
+                expected_action=expected_action,
+                expected_no_op_reason=expected_no_op_reason,
+            )
+            if ok:
+                result["status"] = "✓"
                 return result
 
-            if extra_checks:
-                ok, note = extra_checks(proposal)
-                if not ok:
-                    result["status"] = "✗"
-                    result["notes"] = note
-                    return result
-
-            result["status"] = "✓"
+            result["status"] = "✗"
+            result["notes"] = note
             return result
+
         except asyncio.TimeoutError:
             result["status"] = "✗"
             result["notes"] = "timeout"
             return result  # don't retry timeouts
         except Exception as e:
-            result["notes"] = str(e)[:120]
+            result["notes"] = str(e)[:160]
             if attempt == 0:
                 # Retry once — may be transient parse error from truncated JSON
                 continue
@@ -306,22 +332,10 @@ async def test_t4a_trade(ep: dict, timeout: int) -> dict:
         "no earnings within 14 days, regime is trend_up. "
         "Propose a cash-secured put: 0.20 delta, 30 DTE target."
     )
-    def extra_checks(p):
-        checks = []
-        if p.right != OptionRight.PUT:
-            checks.append(f"right={p.right.value}, expected PUT")
-        if p.cycle_stage != CycleStage.CASH:
-            checks.append(f"stage={p.cycle_stage.value}, expected CASH")
-        if p.strike is None:
-            checks.append("strike is null")
-        if p.expiry is None:
-            checks.append("expiry is null")
-        if p.contracts is None or p.contracts <= 0:
-            checks.append("contracts is null or <= 0")
-        if checks:
-            return False, "; ".join(checks)
-        return True, ""
-    return await _test_options_proposal(ep, timeout, prompt, WheelAction.SELL_PUT, extra_checks)
+    return await _test_options_proposal(
+        ep, timeout, prompt,
+        expected_action=WheelAction.SELL_PUT,
+    )
 
 
 async def test_t4b_noop(ep: dict, timeout: int) -> dict:
@@ -329,11 +343,11 @@ async def test_t4b_noop(ep: dict, timeout: int) -> dict:
         "AAPL has confirmed earnings tomorrow. The account is in cash. "
         "Earnings blackout window is 7 days. Propose an action."
     )
-    def extra_checks(p):
-        if p.no_op_reason != NoOpReason.EARNINGS_BLACKOUT:
-            return False, f"no_op_reason={p.no_op_reason.value}, expected EARNINGS_BLACKOUT"
-        return True, ""
-    return await _test_options_proposal(ep, timeout, prompt, WheelAction.NO_OP, extra_checks)
+    return await _test_options_proposal(
+        ep, timeout, prompt,
+        expected_action=WheelAction.NO_OP,
+        expected_no_op_reason=NoOpReason.EARNINGS_BLACKOUT,
+    )
 
 
 # ---------------------------------------------------------------------------

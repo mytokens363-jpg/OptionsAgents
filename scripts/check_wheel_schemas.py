@@ -192,6 +192,210 @@ for name, fn in [
 ]:
     check(name, fn)
 
+
+# ---------------------------------------------------------------------------
+# Negative tests for wheel_schema_assertions
+# ---------------------------------------------------------------------------
+# These prove the assertion helpers reject the failure modes we've actually
+# seen from the GX10 cluster (empty content from llama.cpp Qwen3, garbage
+# responses from misconfigured vLLM, default-filled objects from langchain
+# fallback paths). Every negative test corresponds to a real diagnostic
+# event documented in docs/LATENCY_ANALYSIS_2026-05-11.md or the smoke logs.
+# ---------------------------------------------------------------------------
+
+# Load wheel_schema_assertions the same way as wheel_schemas (no langchain init)
+_ASSERTION_PATH = os.path.join(_HERE, "..", "tradingagents", "agents", "wheel_schema_assertions.py")
+_aspec = importlib.util.spec_from_file_location("wheel_schema_assertions", _ASSERTION_PATH)
+_amod = importlib.util.module_from_spec(_aspec)
+# wheel_schema_assertions imports from tradingagents.agents.wheel_schemas
+# Inject our pre-loaded schemas module under that name to avoid the package init
+import sys as _sys
+_sys.modules["tradingagents"] = type(_sys)("tradingagents")
+_sys.modules["tradingagents.agents"] = type(_sys)("tradingagents.agents")
+_sys.modules["tradingagents.agents.wheel_schemas"] = _mod
+_aspec.loader.exec_module(_amod)
+
+assert_raw_content_nonempty = _amod.assert_raw_content_nonempty
+assert_proposal_not_none = _amod.assert_proposal_not_none
+assert_rationale_substantive = _amod.assert_rationale_substantive
+assert_valid_sell_put = _amod.assert_valid_sell_put
+assert_valid_no_op = _amod.assert_valid_no_op
+assert_structured_response_complete = _amod.assert_structured_response_complete
+
+
+# Mock raw-response shape that mirrors langchain's AIMessage
+class _MockRaw:
+    def __init__(self, content="", reasoning_content=""):
+        self.content = content
+        self.additional_kwargs = {"reasoning_content": reasoning_content} if reasoning_content else {}
+
+
+# 11. assert_raw_content_nonempty rejects None
+def raw_none_rejected():
+    ok, note = assert_raw_content_nonempty(None)
+    assert not ok and "None" in note, f"expected rejection, got ({ok}, {note})"
+
+# 12. assert_raw_content_nonempty rejects empty content
+def raw_empty_rejected():
+    ok, note = assert_raw_content_nonempty(_MockRaw(content=""))
+    assert not ok, f"expected rejection of empty content, got ({ok}, {note})"
+
+# 13. assert_raw_content_nonempty surfaces llama.cpp reasoning_content issue
+#     (the actual May-2026 diagnostic from Rivet — content empty, reasoning populated)
+def raw_reasoning_only_diagnostic():
+    ok, note = assert_raw_content_nonempty(
+        _MockRaw(content="", reasoning_content="Let me think... the user wants a put...")
+    )
+    assert not ok, "should reject"
+    assert "reasoning_content" in note, f"diagnostic should mention reasoning_content: {note}"
+
+# 14. assert_raw_content_nonempty accepts populated content
+def raw_content_accepted():
+    ok, note = assert_raw_content_nonempty(_MockRaw(content="some real response"))
+    assert ok, f"should accept populated content: {note}"
+
+# 15. assert_proposal_not_none rejects None
+def proposal_none_rejected():
+    ok, note = assert_proposal_not_none(None)
+    assert not ok and "None" in note, f"expected rejection: ({ok}, {note})"
+
+# 16. assert_proposal_not_none rejects wrong type
+def proposal_wrong_type_rejected():
+    ok, note = assert_proposal_not_none({"action": "something"})
+    assert not ok, f"should reject dict: ({ok}, {note})"
+
+# 17. assert_rationale_substantive rejects empty/short rationale
+#     (a model that returns rationale="ok" satisfies the schema but is useless)
+def rationale_empty_rejected():
+    p = OptionsProposal(
+        symbol="AAPL", cycle_stage=CycleStage.CASH,
+        action=WheelAction.SELL_PUT, right=OptionRight.PUT,
+        strike=170.0, expiry=date.today() + timedelta(days=30),
+        contracts=1, rationale="ok",
+    )
+    ok, note = assert_rationale_substantive(p)
+    assert not ok, f"should reject short rationale: ({ok}, {note})"
+    assert "too short" in note
+
+# 18. assert_valid_sell_put catches null strike
+def sell_put_null_strike_caught():
+    # Use bypass-validator construction since Pydantic would normally reject this;
+    # we want to simulate what happens when langchain returns a partially-populated
+    # OptionsProposal (e.g. from a fallback path)
+    try:
+        p = OptionsProposal(
+            symbol="AAPL", cycle_stage=CycleStage.CASH,
+            action=WheelAction.SELL_PUT, right=OptionRight.PUT,
+            expiry=date.today() + timedelta(days=30),
+            contracts=1, rationale="A meaningful rationale for the trade decision.",
+        )
+        # Pydantic actually rejects this because strike is required for SELL_PUT
+        raise AssertionError("Pydantic should have rejected null strike")
+    except ValidationError:
+        # Good — Pydantic catches this at construction. Test the assertion separately
+        # by constructing a model_construct (bypass validation) and asserting our
+        # helper catches what slipped through.
+        p = OptionsProposal.model_construct(
+            symbol="AAPL", cycle_stage=CycleStage.CASH,
+            action=WheelAction.SELL_PUT, right=OptionRight.PUT,
+            strike=None,  # null — should be caught by assertion
+            expiry=date.today() + timedelta(days=30),
+            contracts=1, rationale="A meaningful rationale.",
+        )
+        ok, note = assert_valid_sell_put(p)
+        assert not ok and "strike" in note, f"expected strike rejection: ({ok}, {note})"
+
+# 19. assert_valid_sell_put accepts a well-formed proposal
+def sell_put_well_formed_accepted():
+    p = OptionsProposal(
+        symbol="AAPL", cycle_stage=CycleStage.CASH,
+        action=WheelAction.SELL_PUT, right=OptionRight.PUT,
+        strike=170.0, expiry=date.today() + timedelta(days=30),
+        contracts=1, delta=-0.20, expected_premium=1.85, dte=30,
+        rationale="Selling a 0.20-delta 30-DTE put on AAPL at 170 strike for $1.85 premium.",
+    )
+    ok, note = assert_valid_sell_put(p)
+    assert ok, f"well-formed proposal should pass: {note}"
+
+# 20. assert_valid_no_op rejects mismatched reason
+def no_op_wrong_reason_caught():
+    p = OptionsProposal(
+        symbol="AAPL", cycle_stage=CycleStage.CASH,
+        action=WheelAction.NO_OP, no_op_reason=NoOpReason.REGIME_UNFAVORABLE,
+        rationale="Market regime risk_off; standing down per regime gate.",
+    )
+    ok, note = assert_valid_no_op(p, expected_reason=NoOpReason.EARNINGS_BLACKOUT)
+    assert not ok and "no_op_reason" in note, f"expected reason mismatch: ({ok}, {note})"
+
+# 21. assert_valid_no_op accepts a well-formed NO_OP proposal
+def no_op_well_formed_accepted():
+    p = OptionsProposal(
+        symbol="AAPL", cycle_stage=CycleStage.CASH,
+        action=WheelAction.NO_OP, no_op_reason=NoOpReason.EARNINGS_BLACKOUT,
+        rationale="AAPL has confirmed earnings tomorrow, within 7-day blackout window.",
+    )
+    ok, note = assert_valid_no_op(p, expected_reason=NoOpReason.EARNINGS_BLACKOUT)
+    assert ok, f"well-formed NO_OP should pass: {note}"
+
+# 22. assert_structured_response_complete — end-to-end happy path
+def structured_response_happy_path():
+    p = OptionsProposal(
+        symbol="AAPL", cycle_stage=CycleStage.CASH,
+        action=WheelAction.SELL_PUT, right=OptionRight.PUT,
+        strike=170.0, expiry=date.today() + timedelta(days=30),
+        contracts=1, rationale="A 0.20-delta 30-DTE cash-secured put on AAPL.",
+    )
+    result = {
+        "raw": _MockRaw(content='{"action": "sell_cash_secured_put", ...}'),
+        "parsed": p,
+        "parsing_error": None,
+    }
+    ok, note = assert_structured_response_complete(result, expected_action=WheelAction.SELL_PUT)
+    assert ok, f"happy path should pass: {note}"
+
+# 23. assert_structured_response_complete — catches parsing_error
+def structured_response_catches_parse_error():
+    result = {
+        "raw": _MockRaw(content="garbage"),
+        "parsed": None,
+        "parsing_error": ValueError("could not parse"),
+    }
+    ok, note = assert_structured_response_complete(result, expected_action=WheelAction.SELL_PUT)
+    assert not ok and "parsing error" in note, f"should catch parse error: ({ok}, {note})"
+
+# 24. assert_structured_response_complete — catches the real llama.cpp Qwen3 mode
+#     (empty content + reasoning_content populated; this is the actual May-2026 failure)
+def structured_response_catches_reasoning_only():
+    result = {
+        "raw": _MockRaw(content="", reasoning_content="Let me think about this..."),
+        "parsed": None,  # langchain often returns None when content is empty
+        "parsing_error": None,
+    }
+    ok, note = assert_structured_response_complete(result, expected_action=WheelAction.SELL_PUT)
+    assert not ok, f"should reject empty-content reasoning-only response: ({ok}, {note})"
+    assert "reasoning_content" in note or "empty" in note, \
+        f"diagnostic should explain the issue: {note}"
+
+
+for name, fn in [
+    ("raw None rejected", raw_none_rejected),
+    ("raw empty content rejected", raw_empty_rejected),
+    ("raw reasoning_content-only diagnostic surfaced", raw_reasoning_only_diagnostic),
+    ("raw populated content accepted", raw_content_accepted),
+    ("proposal None rejected", proposal_none_rejected),
+    ("proposal wrong type rejected", proposal_wrong_type_rejected),
+    ("short rationale rejected", rationale_empty_rejected),
+    ("SELL_PUT null strike caught by assertion", sell_put_null_strike_caught),
+    ("well-formed SELL_PUT accepted", sell_put_well_formed_accepted),
+    ("NO_OP wrong reason caught", no_op_wrong_reason_caught),
+    ("well-formed NO_OP accepted", no_op_well_formed_accepted),
+    ("structured response happy path", structured_response_happy_path),
+    ("structured response catches parse error", structured_response_catches_parse_error),
+    ("structured response catches reasoning-only (real llama.cpp Qwen3 bug)", structured_response_catches_reasoning_only),
+]:
+    check(name, fn)
+
+
 print()
 if failures:
     print(f"FAILURES: {len(failures)}")
