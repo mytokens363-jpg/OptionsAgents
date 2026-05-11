@@ -160,13 +160,18 @@ async def test_structured_output(ep: dict, timeout: int) -> dict:
     base_url = ep["base_url"].rstrip("/")
     result = {"test": "T3", "status": "—", "latency_ms": 0, "notes": ""}
     try:
-        llm = ChatOpenAI(
-            model=ep["model"],
-            api_key=ep["api_key"],
-            base_url=base_url,
-            temperature=0,
-            max_tokens=2048,  # reasoning models (Qwen3.6) generate full CoT by default
-        )
+        # Disable Qwen3 reasoning on vLLM cells (hypothesis: CoT causes 37s latency)
+        llm_kwargs = {
+            "model": ep["model"],
+            "api_key": ep["api_key"],
+            "base_url": base_url,
+            "temperature": 0,
+            "max_tokens": 2048,
+        }
+        if ep.get("runtime") == "vllm" and ep.get("model", "").startswith("Qwen3"):
+            llm_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+        
+        llm = ChatOpenAI(**llm_kwargs)
         llm_structured = llm.with_structured_output(HealthCheck)
     except Exception:
         result["status"] = "⊘"
@@ -263,6 +268,8 @@ async def _test_options_proposal(ep: dict, timeout: int, prompt: str,
             proposal = await wrapped
             elapsed = time.monotonic() - start
             result["latency_ms"] = round(elapsed * 1000)
+
+
 
             # Compare by enum member, not string value — model-agnostic
             if proposal.action != expected_action:
