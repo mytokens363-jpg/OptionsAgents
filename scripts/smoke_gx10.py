@@ -182,10 +182,11 @@ async def test_structured_output(ep: dict, timeout: int) -> dict:
     
     for i, target in enumerate(["cold", "warm"]):
         try:
-            start = time.monotonic()
+            t_request_sent = time.monotonic()
             wrapped = asyncio.wait_for(llm_structured.ainvoke(prompt), timeout=timeout)
             obj = await wrapped
-            elapsed = time.monotonic() - start
+            t_response_complete = time.monotonic()
+            elapsed = t_response_complete - t_request_sent
             if target == "cold":
                 t3_cold_ms = round(elapsed * 1000)
                 result_cold = obj
@@ -217,6 +218,14 @@ async def test_structured_output(ep: dict, timeout: int) -> dict:
     
     if result["status"] == "✓":
         result["notes"] += f"; latency={t3_warm_ms}ms"
+    
+    # T3/T4 failures are informational (don't affect exit code)
+    if result_cold:
+        result["T3_cold_ms"] = t3_cold_ms
+        result["notes"] += f"; cold={t3_cold_ms}ms" if result["notes"] else f"cold={t3_cold_ms}ms"
+    if result_warm:
+        result["T3_warm_ms"] = t3_warm_ms
+        result["notes"] += f", warm={t3_warm_ms}ms"
     
     return result
 
